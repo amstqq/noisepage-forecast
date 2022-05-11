@@ -11,6 +11,9 @@ from pandas.api.types import is_datetime64_any_dtype
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
+from collections import defaultdict
+from copy import deepcopy
+
 
 class QueryTemplateEncoder:
     """
@@ -94,6 +97,50 @@ class QueryTemplateMD:
         return f"QueryTemplateMD[{self._query_template_encoding=}, {len(self._params)=}, {self._query_template=}]"
 
 
+# class TransactionAwareParameterMD:
+#     def __init__(self, first_qt_enc_in_txn):
+#         self._qt_enc = first_qt_enc_in_txn
+#         self._transition_params = {}
+
+#     def record(self, row):
+#         """
+#         Given a row in the dataframe, update the metadata object for this specific query template.
+#         """
+#         assert row["query_template"] == self._query_template, "Mismatched query template?"
+#         think_time = row["think_time"]
+#         # Unquote the parameters.
+#         params = [x[1:-1] for x in row["query_params"]]
+#         self._think_time_sketch.add(think_time)
+#         if len(params) > 0:
+#             self._params.append(params)
+#             self._params_times.append(row["log_time"])
+
+#     def get_historical_params(self):
+#         """
+#         Returns
+#         -------
+#         historical_params : pd.DataFrame
+#         """
+#         if len(self._params) > 0:
+#             params = np.stack(self._params)
+#             params = pd.DataFrame(params, index=pd.DatetimeIndex(self._params_times))
+#             for col in params.columns:
+#                 if is_datetime64_any_dtype(params[col]):
+#                     params[col] = params[col].astype("datetime64")
+#                 elif all(params[col].str.isnumeric()):
+#                     params[col] = params[col].astype(int)
+#                 elif all(params[col].str.replace(".", "", regex=False).str.isnumeric()):
+#                     params[col] = params[col].astype(float)
+#             return params.convert_dtypes()
+#         return pd.DataFrame([], index=pd.DatetimeIndex([]))
+
+#     def __repr__(self):
+#         return str(self)
+
+#     def __str__(self):
+#         return f"TransactinoAwareParameterMD[{self._qt_enc=}, {len(self._transition_params)=}]"
+
+
 class ForecastMD:
     SESSION_BEGIN = "SESSION_BEGIN"
     SESSION_END = "SESSION_END"
@@ -111,6 +158,9 @@ class ForecastMD:
         self.arrivals = []
 
         self.cache = {}
+
+        # Map transaction identifier (first query of each txn) to parameter transition dict
+        self.txn_to_transition_params = {}
 
     def augment(self, df):
         # Invalidate the cache.
@@ -136,7 +186,8 @@ class ForecastMD:
         dropped_rows = pre_drop_rows - post_drop_rows
         if dropped_rows > 0:
             print(
-                f"Dropped {dropped_rows} rows belonging to torn/unconforming transactions. {post_drop_rows} rows remain.")
+                f"Dropped {dropped_rows} rows belonging to torn/unconforming transactions. {post_drop_rows} rows remain."
+            )
 
         # Augment the dataframe while updating internal state.
 
@@ -151,8 +202,9 @@ class ForecastMD:
             qt_enc = row["query_template_enc"]
             if qt_enc not in self.qtmds:
                 qt = row["query_template"]
-                self.qtmds[qt_enc] = QueryTemplateMD(query_template=qt,
-                                                     query_template_encoding=self.qt_enc.transform(qt))
+                self.qtmds[qt_enc] = QueryTemplateMD(
+                    query_template=qt, query_template_encoding=self.qt_enc.transform(qt)
+                )
             self.qtmds[qt_enc].record(row)
 
         print("Recording query template info.")
@@ -171,6 +223,8 @@ class ForecastMD:
         begin_times = df.loc[df["query_template"] == "BEGIN", "log_time"]
         self.arrivals.append(begin_times)
 
+        self._compute_txn_aware_parameter(df)
+
     def visualize(self, target):
         assert target in ["sessions", "txns"], f"Bad target: {target}"
 
@@ -182,7 +236,7 @@ class ForecastMD:
 
         def rewrite(s):
             l = 24
-            return "\n".join(s[i:i + l] for i in range(0, len(s), l))
+            return "\n".join(s[i : i + l] for i in range(0, len(s), l))
 
         G = nx.DiGraph(transitions)
         nx.relabel_nodes(G, {k: rewrite(self.qt_enc.inverse_transform(k)) for k in G.nodes}, copy=False)
@@ -215,8 +269,9 @@ class ForecastMD:
         chunksize = max(1, len(groups) // cpu_count())
         grouped = process_map(group_fn, groups, chunksize=chunksize, desc=f"Grouping on {group_key}.", disable=True)
         # TODO(WAN): Parallelize.
-        for group_id, group_qt_encs in tqdm(grouped, desc=f"Computing transition matrix for {group_key}.",
-                                            disable=True):
+        for group_id, group_qt_encs in tqdm(
+            grouped, desc=f"Computing transition matrix for {group_key}.", disable=True
+        ):
             for transition in zip(group_qt_encs, group_qt_encs[1:]):
                 src, dst = transition
                 transitions[src] = transitions.get(src, {})
@@ -233,11 +288,9 @@ class ForecastMD:
     def _group_session(self, item):
         group_id, df = item
         qt_encs = df["query_template_enc"].values
-        qt_encs = np.concatenate([
-            self.qt_enc.transform([self.SESSION_BEGIN]),
-            qt_encs,
-            self.qt_enc.transform([self.SESSION_END]),
-        ])
+        qt_encs = np.concatenate(
+            [self.qt_enc.transform([self.SESSION_BEGIN]), qt_encs, self.qt_enc.transform([self.SESSION_END]),]
+        )
         return group_id, qt_encs
 
     def get_qtmd(self, query_template):
@@ -264,3 +317,86 @@ class ForecastMD:
     def load(path):
         with open(path, "rb") as f:
             return pickle.load(f)
+
+    ########################################
+    # Txn aware parameter data processing ##
+    ########################################
+    def _group_param(self, item):
+        group_id, df = item
+        qt_encs = df["query_template_enc"].values
+        params = df["query_params"].values
+        return group_id, qt_encs, params
+
+    def _compute_txn_aware_parameter(self, df):
+
+        groups = df.groupby("virtual_transaction_id")
+        chunksize = max(1, len(groups) // cpu_count())
+        grouped = process_map(
+            self._group_param,
+            groups,
+            chunksize=chunksize,
+            desc=f"[txn_aware_parameter] Grouping on virtual_transaction_id...",
+            disable=True,
+        )
+
+        # TODO: parallelize
+        for group_id, group_qt_encs, group_params in tqdm(
+            grouped, desc=f"Computing parameter transitions...", disable=False
+        ):
+            # Each parameter is uniquely identified by {qt_enc}_{param_index} called qtp_enc.
+            # ex. 50_0 means qt_enc=50, 0th parameter
+            # Map parameter values to a list of parameters that have this value
+            # ie. {1: [(50_0, 4), (50_2, 1), ...]}
+            # param 50_0 have the value of 1 four times, etc.
+            prev_param_vals_to_qtp_enc = {}
+
+            # Use the first query (index 1 since index 0 is BEGIN) to identify transaction
+            # Transition_params map qtp_enc to a list of parameter encodings and how many times
+            # they share the same value
+            # ex. {51_1: {[51_1_0, 10], [51_1_2, 5], [50_2_1, 3], ...}}
+            # 51_1_0 means most recently seen param 51_1, 51_1_1 means 2nd most recently seen 51_1
+            # 51_1 shares the same value as most recently seen 51_1 10 times
+            transition_params = self.txn_to_transition_params.get(group_qt_encs[1], {})
+            NEW_VAL_TOKEN = "new_val"  # This is used when a parameter doesn't share any value with others
+
+            for qid, qtp in enumerate(zip(group_qt_encs, group_params)):
+                qt_enc, params = qtp
+
+                # Skip BEGIN/ABORT/ROLLBACK/COMMIT (They have no parameters)
+                if len(params) == 0:
+                    continue
+
+                params = [x[1:-1] for x in params]  # Unquote param
+                new_prev_param_vals_to_qtp_enc = deepcopy(
+                    prev_param_vals_to_qtp_enc
+                )  # Deepcopy ensures parameters from the same query do not check depencies on each other
+
+                for pid, pval in enumerate(params):
+                    src_qtp_enc = f"{qt_enc}_{pid}"
+
+                    # Current parameter holds a value that has not been seen before
+                    if pval not in prev_param_vals_to_qtp_enc.keys():
+                        new_prev_param_vals_to_qtp_enc[pval] = [[src_qtp_enc, 1]]
+
+                        transition_params[src_qtp_enc] = transition_params.get(src_qtp_enc, defaultdict(int))
+                        transition_params[src_qtp_enc][NEW_VAL_TOKEN] += 1
+                        continue
+
+                    transition_params[src_qtp_enc] = transition_params.get(src_qtp_enc, defaultdict(int))
+
+                    found = False
+                    for did, dst_item in enumerate(prev_param_vals_to_qtp_enc[pval]):
+                        dst_qtp_enc, seen_times = dst_item
+                        for t in range(seen_times):
+                            dst_qtp_enc_seen_time = f"{dst_qtp_enc}_{t}"
+                            transition_params[src_qtp_enc][dst_qtp_enc_seen_time] += 1
+
+                        if src_qtp_enc == dst_qtp_enc:
+                            found = True
+                            new_prev_param_vals_to_qtp_enc[pval][did][1] += 1
+                    if not found:
+                        new_prev_param_vals_to_qtp_enc[pval].append([src_qtp_enc, 1])
+
+                prev_param_vals_to_qtp_enc = new_prev_param_vals_to_qtp_enc
+
+            self.txn_to_transition_params[group_qt_encs[1]] = transition_params

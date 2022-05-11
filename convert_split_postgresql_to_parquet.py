@@ -6,8 +6,7 @@ import pandas as pd
 import pglast
 from tqdm.contrib.concurrent import process_map
 
-from constants import (DEBUG_POSTGRESQL_PARQUET_FOLDER,
-                       DEBUG_SPLIT_POSTGRESQL_FOLDER, PG_LOG_DTYPES)
+from constants import DEBUG_POSTGRESQL_PARQUET_FOLDER, DEBUG_SPLIT_POSTGRESQL_FOLDER, PG_LOG_DTYPES
 from sql_util import substitute
 
 
@@ -48,10 +47,7 @@ def convert_postgresql_csv_to_parquet(pg_csvlog, pq_path):
     df = df.drop(columns=["query_raw", "params"])
 
     template_param = df["query_subst"].apply(_parse)
-    df = df.assign(
-        query_template=template_param.map(lambda x: x[0]),
-        query_params=template_param.map(lambda x: x[1]),
-    )
+    df = df.assign(query_template=template_param.map(lambda x: x[0]), query_params=template_param.map(lambda x: x[1]),)
     df["query_template"] = df["query_template"].astype("category")
 
     stored_columns = {
@@ -73,7 +69,7 @@ def _extract_params(detail):
     idx = detail.find(prefix)
     if idx == -1:
         return {}
-    parameter_list = detail[idx + len(prefix):]
+    parameter_list = detail[idx + len(prefix) :]
     params = {}
     for pstr in parameter_list.split(", "):
         pnum, pval = pstr.split(" = ")
@@ -96,7 +92,7 @@ def _parse(sql):
     sql = str(sql)
     new_sql, params, last_end = [], [], 0
     for token in pglast.parser.scan(sql):
-        token_str = str(sql[token.start: token.end + 1])
+        token_str = str(sql[token.start : token.end + 1])
         if token.start > last_end:
             new_sql.append(" ")
         if token.name in ["ICONST", "FCONST", "SCONST"]:
@@ -122,9 +118,12 @@ def _convert(csvlog):
 
 def main():
     csvlogs = sorted(list(Path(DEBUG_SPLIT_POSTGRESQL_FOLDER).glob("*.csv")))
-    process_map(_convert, csvlogs,
-                desc=f"Converting split csvlogs in \"{DEBUG_SPLIT_POSTGRESQL_FOLDER}\" "
-                     f"to Parquet in \"{DEBUG_POSTGRESQL_PARQUET_FOLDER}\".")
+    process_map(
+        _convert,
+        csvlogs,
+        desc=f'Converting split csvlogs in "{DEBUG_SPLIT_POSTGRESQL_FOLDER}" '
+        f'to Parquet in "{DEBUG_POSTGRESQL_PARQUET_FOLDER}".',
+    )
 
 
 if __name__ == "__main__":

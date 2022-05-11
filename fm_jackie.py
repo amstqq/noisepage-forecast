@@ -18,6 +18,8 @@ from forecast_models import ForecastModelABC
 from forecast_metadata import QueryTemplateMD, ForecastMD
 from sklearn.model_selection import train_test_split
 
+from typing import Tuple
+
 # LSTM config
 HIDDEN_SIZE = 128
 RNN_LAYERS = 2
@@ -52,7 +54,7 @@ class Network(nn.Module):
 
 class Jackie1m1p(ForecastModelABC):
     def __init__(
-            self, prediction_interval=pd.Timedelta("2S"), prediction_seq_len=5, prediction_horizon=pd.Timedelta("2S")
+        self, prediction_interval=pd.Timedelta("2S"), prediction_seq_len=5, prediction_horizon=pd.Timedelta("2S")
     ):
         """
         Parameters
@@ -71,7 +73,7 @@ class Jackie1m1p(ForecastModelABC):
 
         # Quantiles to be used to generate training data.
         # quantiles_def is of the form (quantile_name, quantile_val).
-        self.quantiles_def: (int, int) = [
+        self.quantiles_def: Tuple[int, int] = [
             (0, 0.01),
             (10, 0.1),
             (20, 0.2),
@@ -94,7 +96,9 @@ class Jackie1m1p(ForecastModelABC):
 
     def fit(self, forecast_md):
         model = {}
-        for qt_enc, qtmd in tqdm(forecast_md.qtmds.items(), total=len(forecast_md.qtmds), desc="Fitting query templates."):
+        for qt_enc, qtmd in tqdm(
+            forecast_md.qtmds.items(), total=len(forecast_md.qtmds), desc="Fitting query templates."
+        ):
             qt = qtmd._query_template
 
             model[qt] = {}
@@ -103,10 +107,12 @@ class Jackie1m1p(ForecastModelABC):
             # For example, $1 would map to the first column, and $2 would map to the second column.
             params_df = qtmd.get_historical_params().copy(deep=True)
             # Then, for each column in the parameter dataframe,
-            for param_idx, param_col in tqdm(enumerate(params_df, 1),
-                                             total=len(params_df.columns),
-                                             desc=f"Fitting parameters for: {qt}",
-                                             leave=False):
+            for param_idx, param_col in tqdm(
+                enumerate(params_df, 1),
+                total=len(params_df.columns),
+                desc=f"Fitting parameters for: {qt}",
+                leave=False,
+            ):
                 model[qt][param_idx] = {}
 
                 params: pd.Series = params_df[param_col]
@@ -161,13 +167,9 @@ class Jackie1m1p(ForecastModelABC):
                 # But we still want to train on all the data.
                 if len(X) <= 1:
                     print(f"Warning: not enough data ({X.shape=}), will double up rows: {qt}.")
-                    X = np.concatenate([X,X])
+                    X = np.concatenate([X, X])
                     Y = np.concatenate([Y, Y])
-                X_train, X_test, Y_train, Y_test = train_test_split(
-                    X, Y,
-                    shuffle=False,
-                    test_size=0.1,
-                )
+                X_train, X_test, Y_train, Y_test = train_test_split(X, Y, shuffle=False, test_size=0.1,)
                 X_train, Y_train = X, Y
 
                 # X: (N, seq_len, num_quantiles) to (seq_len, N, num_quantiles).
@@ -285,9 +287,11 @@ class Jackie1m1p(ForecastModelABC):
         np.random.shuffle(arr)
 
         train_loss = 0
-        batch_bar = tqdm(total=X_train.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Train", disable=True)
+        batch_bar = tqdm(
+            total=X_train.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Train", disable=True
+        )
         for ind in arr:
-            seq = torch.tensor(X_train[:, ind: ind + 1, :]).to(DEVICE).float()
+            seq = torch.tensor(X_train[:, ind : ind + 1, :]).to(DEVICE).float()
             labels = torch.tensor(Y_train[ind]).to(DEVICE).float()
             optimizer.zero_grad()
             y_pred = model(seq)
@@ -312,9 +316,11 @@ class Jackie1m1p(ForecastModelABC):
         # Validation loss
         model.eval()
         val_loss = 0
-        batch_bar = tqdm(total=X_test.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Validate", disable=True)
+        batch_bar = tqdm(
+            total=X_test.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Validate", disable=True
+        )
         for ind in range(X_test.shape[1]):
-            seq = torch.tensor(X_test[:, ind: ind + 1, :]).to(DEVICE).float()
+            seq = torch.tensor(X_test[:, ind : ind + 1, :]).to(DEVICE).float()
             labels = torch.tensor(Y_test[ind]).to(DEVICE).float()
 
             with torch.no_grad():

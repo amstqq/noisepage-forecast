@@ -18,7 +18,7 @@ export ROOT_DIR=$(pwd)
 
 export ARTIFACT_CONFIG="${ROOT_DIR}/artifacts/${BENCHMARK}_config.xml"
 
-rm -rf artifacts build
+sudo rm -rf artifacts build
 mkdir -p ${DIR_TRAIN}
 mkdir -p ${DIR_EVAL}
 
@@ -31,7 +31,8 @@ PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='none'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='off'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='off'"
-sudo systemctl restart postgresql
+# sudo systemctl restart postgresql
+brew services restart postgresql
 until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
 
 PGPASSWORD=${DB_PASS} dropdb --if-exists --host=localhost --username=${DB_USER} ${DB_NAME}
@@ -69,7 +70,7 @@ cd -
 PGPASSWORD=${DB_PASS} pg_dump --host=localhost --username=${DB_USER} --format=directory --file=${DIR_DUMP} ${DB_NAME}
 
 # Clear old log files.
-sudo bash -c "rm -rf /var/lib/postgresql/14/main/log/*"
+sudo bash -c "rm -rf /usr/local/var/postgres/log/*"
 
 # Enable logging.
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='csvlog'"
@@ -77,7 +78,8 @@ PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='all'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='on'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='on'"
-sudo systemctl restart postgresql
+# sudo systemctl restart postgresql
+brew services restart postgresql
 until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
 
 # Run Benchbase. Uses NoisePage-Pilot.
@@ -86,7 +88,8 @@ java -jar benchbase.jar -b ${BENCHMARK} -c ${ARTIFACT_CONFIG} --execute=true
 cd -
 
 # Copy the log files.
-sudo bash -c "cat /var/lib/postgresql/14/main/log/*.csv > ${DIR_TRAIN}/query_log.csv"
+# sudo bash -c "cat /var/lib/postgresql/14/main/log/*.csv > ${DIR_TRAIN}/query_log.csv"
+sudo bash -c "cat /usr/local/var/postgres/log/*.csv > ${DIR_TRAIN}/query_log.csv"
 
 # Disable logging.
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='stderr'"
@@ -94,7 +97,8 @@ PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='none'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='off'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='off'"
-sudo systemctl restart postgresql
+# sudo systemctl restart postgresql
+brew services restart postgresql
 until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
 
 # Restore from dump.
@@ -106,10 +110,10 @@ PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=${DB_USER} --clean 
 
 # Run pipeline to create a forecast.
 # Ideally, we would then create a query log to replay at this point, but pgreplay barfs too hard.
-python3 ./convert_postgresql_to_split_postgresql.py
-python3 ./convert_split_postgresql_to_parquet.py
-python3 ./convert_parquet_to_split_parquet.py
-#python3 ./convert_parquet_to_forecast.py
+python ./convert_postgresql_to_split_postgresql.py
+python ./convert_split_postgresql_to_parquet.py
+python ./convert_parquet_to_split_parquet.py
+#python ./convert_parquet_to_forecast.py
 #
 ## ---
 ## Evaluation.

@@ -9,10 +9,18 @@ import pandas as pd
 from neuralprophet import NeuralProphet
 from tqdm import tqdm, trange
 
-from constants import (DEBUG_FORECAST_FOLDER, DEBUG_POSTGRESQL_PARQUET_TRAIN, DEBUG_POSTGRESQL_PARQUET_FUTURE,
-                       PG_LOG_DTYPES)
+from constants import (
+    DEBUG_FORECAST_FOLDER,
+    DEBUG_POSTGRESQL_PARQUET_TRAIN,
+    DEBUG_POSTGRESQL_PARQUET_FUTURE,
+    PG_LOG_DTYPES,
+)
 from forecast_metadata import ForecastMD
 from generated_forecast_md import GeneratedForecastMD
+
+import os
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 
 def generate_forecast_arrivals(fmd, target_timestamp, granularity, plot):
@@ -104,8 +112,11 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
     forecast_arrivals = generate_forecast_arrivals(fmd, target_timestamp, granularity, plot)
     model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
 
-    for i, row in tqdm(forecast_arrivals.iterrows(), total=forecast_arrivals.shape[0],
-                       desc="Generating sessions until the forecast horizon."):
+    for i, row in tqdm(
+        forecast_arrivals.iterrows(),
+        total=forecast_arrivals.shape[0],
+        desc="Generating sessions until the forecast horizon.",
+    ):
         current_ts = row.ds
         num_forecasted_sessions = math.ceil(row.yhat1)
         destination_parquet = out_folder / f"{current_ts}.parquet"
@@ -136,7 +147,7 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                 # Pick the next query template by sampling the Markov chain.
                 transitions = fmd.transition_txns[qte_cur].items()
                 candidate_templates = [k for k, _ in transitions]
-                probs = np.array([v['weight'] for _, v in transitions])
+                probs = np.array([v["weight"] for _, v in transitions])
                 probs = probs / np.sum(probs)
                 qte_cur = np.random.choice(candidate_templates, p=probs)
 
@@ -144,7 +155,9 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                 qt_cur = fmd.qt_enc.inverse_transform(qte_cur)
                 params_cur = model.generate_parameters(qt_cur, current_session_ts)
                 # Advance the time.
-                current_session_ts += pd.Timedelta(seconds=fmd.qtmds[qte_cur]._think_time_sketch.get_quantile_value(0.5))
+                current_session_ts += pd.Timedelta(
+                    seconds=fmd.qtmds[qte_cur]._think_time_sketch.get_quantile_value(0.5)
+                )
             # Write the sample path.
             for session_num, session_line_num, qt, params in sample_path:
                 rows.append([session_num, session_line_num, qt, params])
@@ -162,20 +175,22 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
 
 
 def main():
-    # fmd = ForecastMD()
-    # pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
-    # print(f"Parquet files: {pq_files}")
-    # for pq_file in tqdm(pq_files, desc="Reading Parquet files.", disable=True):
-    #     df = pd.read_parquet(pq_file)
-    #     df["log_time"] = df["log_time"].dt.tz_convert("UTC")
-    #     print(f"{pq_file} has timestamps from {df['log_time'].min()} to {df['log_time'].max()}.")
-    #     df["query_template"] = df["query_template"].replace("", np.nan)
-    #     dropna_before = df.shape[0]
-    #     df = df.dropna(subset=["query_template"])
-    #     dropna_after = df.shape[0]
-    #     print(f"Dropped {dropna_before - dropna_after} empty query template rows in {pq_file}. {dropna_after} rows remain.")
-    #     fmd.augment(df)
-    # fmd.save("fmd.pkl")
+    fmd = ForecastMD()
+    pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
+    print(f"Parquet files: {pq_files}")
+    for pq_file in tqdm(pq_files, desc="Reading Parquet files.", disable=True):
+        df = pd.read_parquet(pq_file)
+        df["log_time"] = df["log_time"].dt.tz_convert("UTC")
+        print(f"{pq_file} has timestamps from {df['log_time'].min()} to {df['log_time'].max()}.")
+        df["query_template"] = df["query_template"].replace("", np.nan)
+        dropna_before = df.shape[0]
+        df = df.dropna(subset=["query_template"])
+        dropna_after = df.shape[0]
+        print(
+            f"Dropped {dropna_before - dropna_after} empty query template rows in {pq_file}. {dropna_after} rows remain."
+        )
+        fmd.augment(df)
+    fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")
 
@@ -188,12 +203,14 @@ def main():
     # distfit model.
     if "distfit" not in cache["forecast_model"]:
         from fm_distfit import DistfitModel
+
         cache["forecast_model"]["distfit"] = DistfitModel().fit(fmd)
         fmd.save("fmd.pkl")
 
     # Jackie's 1m1p model.
     if "jackie1m1p" not in cache["forecast_model"]:
         from fm_jackie import Jackie1m1p
+
         cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
         fmd.save("fmd.pkl")
 
