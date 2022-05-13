@@ -14,6 +14,8 @@ from tqdm.contrib.concurrent import process_map
 from collections import defaultdict
 from copy import deepcopy
 
+from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN
+
 
 class QueryTemplateEncoder:
     """
@@ -95,50 +97,6 @@ class QueryTemplateMD:
 
     def __str__(self):
         return f"QueryTemplateMD[{self._query_template_encoding=}, {len(self._params)=}, {self._query_template=}]"
-
-
-# class TransactionAwareParameterMD:
-#     def __init__(self, first_qt_enc_in_txn):
-#         self._qt_enc = first_qt_enc_in_txn
-#         self._transition_params = {}
-
-#     def record(self, row):
-#         """
-#         Given a row in the dataframe, update the metadata object for this specific query template.
-#         """
-#         assert row["query_template"] == self._query_template, "Mismatched query template?"
-#         think_time = row["think_time"]
-#         # Unquote the parameters.
-#         params = [x[1:-1] for x in row["query_params"]]
-#         self._think_time_sketch.add(think_time)
-#         if len(params) > 0:
-#             self._params.append(params)
-#             self._params_times.append(row["log_time"])
-
-#     def get_historical_params(self):
-#         """
-#         Returns
-#         -------
-#         historical_params : pd.DataFrame
-#         """
-#         if len(self._params) > 0:
-#             params = np.stack(self._params)
-#             params = pd.DataFrame(params, index=pd.DatetimeIndex(self._params_times))
-#             for col in params.columns:
-#                 if is_datetime64_any_dtype(params[col]):
-#                     params[col] = params[col].astype("datetime64")
-#                 elif all(params[col].str.isnumeric()):
-#                     params[col] = params[col].astype(int)
-#                 elif all(params[col].str.replace(".", "", regex=False).str.isnumeric()):
-#                     params[col] = params[col].astype(float)
-#             return params.convert_dtypes()
-#         return pd.DataFrame([], index=pd.DatetimeIndex([]))
-
-#     def __repr__(self):
-#         return str(self)
-
-#     def __str__(self):
-#         return f"TransactinoAwareParameterMD[{self._qt_enc=}, {len(self._transition_params)=}]"
 
 
 class ForecastMD:
@@ -344,22 +302,24 @@ class ForecastMD:
             grouped, desc=f"Computing parameter transitions...", disable=False
         ):
             # Each parameter is uniquely identified by {qt_enc}_{param_index} called qtp_enc.
-            # ex. 50_0 means qt_enc=50, 0th parameter
+            # ex. 50_1 means qt_enc=50, 1st parameter (parameter uses 1-based indexing)
             # Map parameter values to a list of parameters that have this value
-            # ie. {1: [(50_0, 4), (50_2, 1), ...]}
-            # param 50_0 have the value of 1 four times, etc.
+            # ie. {1: [(50_1, 4), (50_2, 1), ...]}
+            # param 50_1 have the value of 1 four times, etc.
             prev_param_vals_to_qtp_enc = {}
 
             # Use the first query (index 1 since index 0 is BEGIN) to identify transaction
             # Transition_params map qtp_enc to a list of parameter encodings and how many times
             # they share the same value
-            # ex. {51_1: {[51_1_0, 10], [51_1_2, 5], [50_2_1, 3], ...}}
-            # 51_1_0 means most recently seen param 51_1, 51_1_1 means 2nd most recently seen 51_1
+            # ex. {51_1:
+            #           { 51_1_1: 10, 51_1_2: 5, 50_2_1: 3, ...}
+            #           ...
+            #      }
+            # 51_1_1 means most recently seen param 51_1, 51_1_2 means 2nd most recently seen 51_1
             # 51_1 shares the same value as most recently seen 51_1 10 times
             transition_params = self.txn_to_transition_params.get(group_qt_encs[1], {})
-            NEW_VAL_TOKEN = "new_val"  # This is used when a parameter doesn't share any value with others
 
-            for qid, qtp in enumerate(zip(group_qt_encs, group_params)):
+            for qtp in zip(group_qt_encs, group_params):
                 qt_enc, params = qtp
 
                 # Skip BEGIN/ABORT/ROLLBACK/COMMIT (They have no parameters)
@@ -371,32 +331,33 @@ class ForecastMD:
                     prev_param_vals_to_qtp_enc
                 )  # Deepcopy ensures parameters from the same query do not check depencies on each other
 
-                for pid, pval in enumerate(params):
-                    src_qtp_enc = f"{qt_enc}_{pid}"
+                for pidx, pval in enumerate(params, 1):
+                    src_qtp_enc = f"{qt_enc}_{pidx}"
 
-                    # Current parameter holds a value that has not been seen before
                     if pval not in prev_param_vals_to_qtp_enc.keys():
+                        # Current parameter holds a value that has not been seen before
                         new_prev_param_vals_to_qtp_enc[pval] = [[src_qtp_enc, 1]]
-
                         transition_params[src_qtp_enc] = transition_params.get(src_qtp_enc, defaultdict(int))
-                        transition_params[src_qtp_enc][NEW_VAL_TOKEN] += 1
+                        transition_params[src_qtp_enc][TXN_AWARE_PARAM_NEW_VAL_TOKEN] += 1
                         continue
 
                     transition_params[src_qtp_enc] = transition_params.get(src_qtp_enc, defaultdict(int))
 
                     found = False
-                    for did, dst_item in enumerate(prev_param_vals_to_qtp_enc[pval]):
+                    for didx, dst_item in enumerate(prev_param_vals_to_qtp_enc[pval]):
                         dst_qtp_enc, seen_times = dst_item
                         for t in range(seen_times):
-                            dst_qtp_enc_seen_time = f"{dst_qtp_enc}_{t}"
+                            dst_qtp_enc_seen_time = f"{dst_qtp_enc}_{t+1}"
                             transition_params[src_qtp_enc][dst_qtp_enc_seen_time] += 1
 
                         if src_qtp_enc == dst_qtp_enc:
                             found = True
-                            new_prev_param_vals_to_qtp_enc[pval][did][1] += 1
+                            new_prev_param_vals_to_qtp_enc[pval][didx][1] += 1
                     if not found:
                         new_prev_param_vals_to_qtp_enc[pval].append([src_qtp_enc, 1])
 
                 prev_param_vals_to_qtp_enc = new_prev_param_vals_to_qtp_enc
 
             self.txn_to_transition_params[group_qt_encs[1]] = transition_params
+
+    # TODO: filter out entries with less than 5% count.

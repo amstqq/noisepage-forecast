@@ -18,9 +18,12 @@ from constants import (
 from forecast_metadata import ForecastMD
 from generated_forecast_md import GeneratedForecastMD
 
+
 import os
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+
+TXN_AWARE_PARAM_FORECAST = True  # Whether to use txn aware parameter forecasting
 
 
 def generate_forecast_arrivals(fmd, target_timestamp, granularity, plot):
@@ -110,7 +113,8 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
         pickle.dump(metadata, f)
 
     forecast_arrivals = generate_forecast_arrivals(fmd, target_timestamp, granularity, plot)
-    model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
+    # model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
+    model = fmd.get_cache()["forecast_model"]["distfit"]
 
     for i, row in tqdm(
         forecast_arrivals.iterrows(),
@@ -134,9 +138,10 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
 
             # Generate a sample path for the current session.
             sample_path = []
+            first_qte = None
             while True:
                 # Emit.
-                sample_path.append((session_num, session_line_num, qt_cur, params_cur))
+                sample_path.append((session_num, session_line_num, qt_cur, params_cur, qte_cur))
                 # Stop.
                 if qte_cur in qte_ends:
                     break
@@ -150,17 +155,29 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                 probs = np.array([v["weight"] for _, v in transitions])
                 probs = probs / np.sum(probs)
                 qte_cur = np.random.choice(candidate_templates, p=probs)
+                # The first query of a sample path (other than BEGIN) is used to identify
+                # a transaction.
+                if first_qte == None:
+                    first_qte = qte_cur
 
                 # Generate the parameters.
                 qt_cur = fmd.qt_enc.inverse_transform(qte_cur)
-                params_cur = model.generate_parameters(qt_cur, current_session_ts)
+                if TXN_AWARE_PARAM_FORECAST:
+                    params_cur = model.generate_parameters_txn_aware(
+                        qt_cur, qte_cur, current_session_ts, fmd.txn_to_transition_params[first_qte], sample_path
+                    )
+                else:
+                    params_cur = model.generate_parameters(qt_cur, current_session_ts)
+
                 # Advance the time.
                 current_session_ts += pd.Timedelta(
                     seconds=fmd.qtmds[qte_cur]._think_time_sketch.get_quantile_value(0.5)
                 )
             # Write the sample path.
-            for session_num, session_line_num, qt, params in sample_path:
-                rows.append([session_num, session_line_num, qt, params])
+            for session_num, session_line_num, qt, params, _ in sample_path:
+                # rows.append([session_num, session_line_num, qt, params])
+                rows.append([session_num, session_line_num, qt, tuple(v for _, v in sorted(params.items()))])
+
         dtypes = {
             "session_id": str,
             "session_line_num": "Int64",
@@ -175,22 +192,22 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
 
 
 def main():
-    fmd = ForecastMD()
-    pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
-    print(f"Parquet files: {pq_files}")
-    for pq_file in tqdm(pq_files, desc="Reading Parquet files.", disable=True):
-        df = pd.read_parquet(pq_file)
-        df["log_time"] = df["log_time"].dt.tz_convert("UTC")
-        print(f"{pq_file} has timestamps from {df['log_time'].min()} to {df['log_time'].max()}.")
-        df["query_template"] = df["query_template"].replace("", np.nan)
-        dropna_before = df.shape[0]
-        df = df.dropna(subset=["query_template"])
-        dropna_after = df.shape[0]
-        print(
-            f"Dropped {dropna_before - dropna_after} empty query template rows in {pq_file}. {dropna_after} rows remain."
-        )
-        fmd.augment(df)
-    fmd.save("fmd.pkl")
+    # fmd = ForecastMD()
+    # pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
+    # print(f"Parquet files: {pq_files}")
+    # for pq_file in tqdm(pq_files, desc="Reading Parquet files.", disable=True):
+    #     df = pd.read_parquet(pq_file)
+    #     df["log_time"] = df["log_time"].dt.tz_convert("UTC")
+    #     print(f"{pq_file} has timestamps from {df['log_time'].min()} to {df['log_time'].max()}.")
+    #     df["query_template"] = df["query_template"].replace("", np.nan)
+    #     dropna_before = df.shape[0]
+    #     df = df.dropna(subset=["query_template"])
+    #     dropna_after = df.shape[0]
+    #     print(
+    #         f"Dropped {dropna_before - dropna_after} empty query template rows in {pq_file}. {dropna_after} rows remain."
+    #     )
+    #     fmd.augment(df)
+    # fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")
 
@@ -208,11 +225,11 @@ def main():
         fmd.save("fmd.pkl")
 
     # Jackie's 1m1p model.
-    if "jackie1m1p" not in cache["forecast_model"]:
-        from fm_jackie import Jackie1m1p
+    # if "jackie1m1p" not in cache["forecast_model"]:
+    #     from fm_jackie import Jackie1m1p
 
-        cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
-        fmd.save("fmd.pkl")
+    #     cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
+    #     fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")
 
@@ -223,7 +240,7 @@ def main():
     forecast_target = future_df["log_time"].max().tz_convert("UTC")
 
     print(f"Generating forecast. [{arrivals.min()}, {arrivals.max()}] to {forecast_target}.")
-    generate_forecast(fmd, forecast_target, pd.Timedelta(seconds=1), plot=True)
+    generate_forecast(fmd, forecast_target, pd.Timedelta(seconds=1), plot=False)
 
 
 if __name__ == "__main__":

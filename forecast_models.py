@@ -1,5 +1,6 @@
 from abc import abstractmethod, ABC
 
+
 class ForecastModelABC(ABC):
     @abstractmethod
     def fit(self, forecast_md):
@@ -30,5 +31,20 @@ class ForecastModelABC(ABC):
         -------
         params : Dict[str, str]
             The generated parameters, a dict mapping from "$n" keys to quoted parameter values.
+        """
+        pass
+
+    @abstractmethod
+    def generate_parameters_txn_aware(
+        self, query_template, query_template_encoding, timestamp, transition_params, sample_path
+    ):
+        """Generate a set of txn-aware parameters for the specified query template as of the specified time.
+
+        Args:
+            query_template (str)
+            query_template_encoding (int)
+            current_session_ts (str)
+            transition_params (Dict): Map dependencies of one parameter to other parameters
+            sample_path (List): Previously generated queries
         """
         pass
