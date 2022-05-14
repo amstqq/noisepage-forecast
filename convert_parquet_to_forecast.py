@@ -14,16 +14,10 @@ from constants import (
     DEBUG_POSTGRESQL_PARQUET_TRAIN,
     DEBUG_POSTGRESQL_PARQUET_FUTURE,
     PG_LOG_DTYPES,
+    TXN_AWARE_PARAM_FORECAST,
 )
 from forecast_metadata import ForecastMD
 from generated_forecast_md import GeneratedForecastMD
-
-
-import os
-
-os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
-
-TXN_AWARE_PARAM_FORECAST = True  # Whether to use txn aware parameter forecasting
 
 
 def generate_forecast_arrivals(fmd, target_timestamp, granularity, plot):
@@ -113,8 +107,8 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
         pickle.dump(metadata, f)
 
     forecast_arrivals = generate_forecast_arrivals(fmd, target_timestamp, granularity, plot)
-    # model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
-    model = fmd.get_cache()["forecast_model"]["distfit"]
+    model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
+    # model = fmd.get_cache()["forecast_model"]["distfit"]
 
     for i, row in tqdm(
         forecast_arrivals.iterrows(),
@@ -175,8 +169,8 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                 )
             # Write the sample path.
             for session_num, session_line_num, qt, params, _ in sample_path:
-                # rows.append([session_num, session_line_num, qt, params])
-                rows.append([session_num, session_line_num, qt, tuple(v for _, v in sorted(params.items()))])
+                rows.append([session_num, session_line_num, qt, params])
+                # rows.append([session_num, session_line_num, qt, tuple(v for _, v in sorted(params.items()))])
 
         dtypes = {
             "session_id": str,
@@ -192,6 +186,9 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
 
 
 def main():
+    # import os
+    # os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
     # fmd = ForecastMD()
     # pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
     # print(f"Parquet files: {pq_files}")
@@ -225,11 +222,11 @@ def main():
         fmd.save("fmd.pkl")
 
     # Jackie's 1m1p model.
-    # if "jackie1m1p" not in cache["forecast_model"]:
-    #     from fm_jackie import Jackie1m1p
+    if "jackie1m1p" not in cache["forecast_model"]:
+        from fm_jackie import Jackie1m1p
 
-    #     cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
-    #     fmd.save("fmd.pkl")
+        cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
+        fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")
 

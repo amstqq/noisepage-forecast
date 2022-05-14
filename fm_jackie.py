@@ -3,9 +3,11 @@ import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
 import pandas as pd
-from scipy import stats
-import joypy
+
+# from scipy import stats
+# import joypy
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 import pickle
 import os
@@ -16,14 +18,15 @@ from pathlib import Path
 
 from forecast_models import ForecastModelABC
 from forecast_metadata import QueryTemplateMD, ForecastMD
-from sklearn.model_selection import train_test_split
+from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN
 
 from typing import Tuple
+from collections import defaultdict
 
 # LSTM config
 HIDDEN_SIZE = 128
 RNN_LAYERS = 2
-EPOCHS = 50
+EPOCHS = 1  # 1 epoch for debug
 LR = 0.0001
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -126,7 +129,7 @@ class Jackie1m1p(ForecastModelABC):
                 #  If we use StandardScaler normalization, which this is, then it won't adapt to new min/max.
                 #  Could we get away with a different transform?
                 mean = params.mean()
-                std = params.std()
+                std = 0 if len(params) < 2 else params.std()
                 if std != 0:
                     normalized = (params - mean) / std
                 else:
@@ -275,6 +278,186 @@ class Jackie1m1p(ForecastModelABC):
             # Param dict values must be quoted for consistency.
             params[f"${param_idx}"] = f"'{param_val}'"
         return params
+
+    def generate_parameters_txn_aware(
+        self, query_template, query_template_encoding, timestamp, transition_params, sample_path
+    ):
+        target_timestamp = pd.Timestamp(timestamp)
+
+        # Dict that maps how many times each query template appears in sample_path. This is used
+        # to filter the parameter transition dict, since a parameter might depend on many different
+        # params that appear before it
+        qt_encs_count = defaultdict(int)
+        for _, _, _, _, qt_enc in sample_path:
+            qt_encs_count[qt_enc] += 1
+
+        # Generate the parameters.
+        params = {}
+        for param_idx in self.model[query_template]:
+            fit_obj = self.model[query_template][param_idx]
+            fit_type = fit_obj["type"]
+
+            param_val = None
+
+            if fit_type == "sample":
+                param_val = self._rng.choice(fit_obj["sample"])
+                assert param_val is not None
+                # Param dict values must be quoted for consistency.
+                params[f"${param_idx}"] = f"'{param_val}'"
+                continue
+
+            # Try to get a parameter value by using transition dict (which encodes dependencies between parameters)
+            param_val = self._get_parameter_from_transition_dict(
+                query_template_encoding, transition_params, sample_path, param_idx, qt_encs_count
+            )
+            if param_val != None:
+                params[f"${param_idx}"] = param_val  # Previous param is already quoted. No need to quote again
+                continue
+
+            # param_val is None, meaning a new value should be generated from the forecast model
+            param_val = self._get_parameter_from_forecast_model(fit_obj, target_timestamp)
+            assert param_val is not None
+            # Param dict values must be quoted for consistency.
+            params[f"${param_idx}"] = f"'{param_val}'"
+
+        return params
+
+    def _get_parameter_from_transition_dict(
+        self, query_template_encoding, transition_params, sample_path, param_idx, qt_encs_count
+    ):
+        """Get a parameter value by examining what previous parameters it depends on. Return None if 
+        no dependency is found, and a value should be generated from the forecast model.
+
+        Args:
+            query_template_encoding (int)
+            transition_params (Dict): Contains dependencies between all parameters
+            sample_path (List): all queries with parameters generated so far
+            param_idx (int): index of the parameter in which value is to be sampled
+            qt_encs_count (Dict): Map each qt_enc to how many times it appears in sample path
+
+        Returns:
+            str: value of parameter, None if no dependency found
+        """
+        # Extract dependencies of current parameters wrt. all parameters seen in sample_path
+        qtp_enc = f"{query_template_encoding}_{param_idx}"
+
+        # Current parameter does not exist in transition dict
+        if qtp_enc not in transition_params:
+            return None
+
+        candidate_qtp_enc_most_recent = transition_params[qtp_enc].keys()
+        final_candidates = []
+        final_probs = []
+
+        # Check which entries in transition dict actually appear in the sample_path
+        for qtp_enc_most_recent in candidate_qtp_enc_most_recent:
+            # The NEW_VAL_TOKEN entry indicates that a new value is to be sampled from the
+            # model. This is always included in the transition dict.
+            if qtp_enc_most_recent == TXN_AWARE_PARAM_NEW_VAL_TOKEN:
+                final_candidates.append(qtp_enc_most_recent)
+                final_probs.append(transition_params[qtp_enc][qtp_enc_most_recent])
+                continue
+
+            # qtp_enc_most_recent --> {qt_enc}_{param_index}_{nth most recently seen}
+            splits = qtp_enc_most_recent.split("_")
+            qt_enc = int(splits[0])
+            nth_most_recent = int(splits[2])
+            if qt_enc in qt_encs_count and nth_most_recent <= qt_encs_count[qt_enc]:
+                final_candidates.append(qtp_enc_most_recent)
+                final_probs.append(transition_params[qtp_enc][qtp_enc_most_recent])
+
+        # If current parameter does not depend on any previous parameter, then sample a new one
+        if len(final_candidates) == 0:
+            return None
+
+        final_probs = np.array(final_probs)
+        final_probs = final_probs / np.sum(final_probs)
+        qtp_enc_most_recent = np.random.choice(final_candidates, p=final_probs)
+
+        # Selected transition is NEW_VAL_TOKEN, meaning a new value is to be sampled
+        if qtp_enc_most_recent == TXN_AWARE_PARAM_NEW_VAL_TOKEN:
+            return None
+
+        splits = qtp_enc_most_recent.split("_")
+        dst_qt_enc = int(splits[0])
+        dst_param_idx = int(splits[1])
+        nth_most_recent = int(splits[2])
+
+        # Locate the nth most recently seen `dst_qt_enc`, and retrieve its `dst_param_idx` param.
+        seen_times = 0
+        for _, _, _, qt_params, qt_enc in reversed(sample_path):
+            if qt_enc == dst_qt_enc:
+                seen_times += 1
+
+            if nth_most_recent == seen_times:
+                param_val = qt_params[f"${dst_param_idx}"]
+                break
+        assert param_val is not None
+
+        return param_val
+
+    def _get_parameter_from_forecast_model(self, fit_obj, target_timestamp):
+        """Generate a parameter value from the corresponding fit_obj, by continously unrolling
+        RNN until target_timestamp.
+        """
+
+        param_model = fit_obj["jackie1m1p"]["model"]
+        param_mean = fit_obj["jackie1m1p"]["mean"]
+        param_std = fit_obj["jackie1m1p"]["std"]
+        param_X = fit_obj["jackie1m1p"]["X"]
+        param_X_ts = fit_obj["jackie1m1p"]["X_ts"]
+
+        start_timestamp_idx = -1
+        # If the start timestamp was within in the training data, use the last value before said timestamp.
+        candidate_indexes = np.argwhere(param_X_ts <= target_timestamp)
+        if candidate_indexes.shape[0] != 0:
+            start_timestamp_idx = candidate_indexes.max()
+        start_timestamp = param_X_ts[start_timestamp_idx]
+
+        # seq : (seq_len, num_quantiles)
+        seq = param_X[start_timestamp_idx]
+        # seq : (1, seq_len, num_quantiles)
+        seq = seq[None, :, :]
+        # seq : (seq_len, 1, num_quantiles)
+        seq = np.transpose(seq, (1, 0, 2))
+        seq = torch.tensor(seq).to(DEVICE).float()
+
+        # TODO(WAN): cache predicted values.
+
+        # Predict until the target timestamp is reached.
+        pred = seq[-1, -1, :]
+        pred = torch.cummax(pred, dim=0).values
+        num_predictions = int((target_timestamp - start_timestamp) / self.prediction_interval)
+        for _ in range(num_predictions):
+            # Predict the quantiles from the model.
+            with torch.no_grad():
+                pred = param_model(seq)
+
+            # Ensure prediction quantile values are strictly increasing.
+            pred = pred[-1, -1, :]
+            pred = torch.cummax(pred, dim=0).values
+
+            # Add pred to original seq to create new seq for next time stamp.
+            seq = torch.squeeze(seq, axis=1)
+            seq = torch.cat((seq[1:, :], pred[None, :]), axis=0)
+            seq = seq[:, None, :]
+
+        pred = pred.cpu().detach().numpy()
+
+        # Un-normalize the quantiles.
+        if param_std != 0:
+            pred = pred * param_std + param_mean
+        else:
+            pred = pred + param_mean
+
+        # TODO(WAN): We now have all the quantile values. How do we sample from them?
+        # Randomly pick a bucket, and then randomly pick a value.
+        # There are len(pred) - 1 many buckets.
+        bucket = self._rng.integers(low=0, high=len(pred) - 1, endpoint=False)
+        left_bound, right_bound = pred[bucket], pred[bucket + 1]
+        param_val = self._rng.uniform(left_bound, right_bound)
+
+        return param_val
 
     ###################################################################################################
     #########################           Model Training        #########################################
