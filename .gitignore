@@ -32,3 +32,5 @@ dist/
 *.so
 
 fmd.pkl
+db_schema.pkl
+benchbase/

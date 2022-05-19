@@ -1,11 +1,13 @@
-set -euxo pipefail
+#!/bin/env bash
+
+# set -euxo pipefail
 
 export DB_USER="forecast_user"
 export DB_PASS="forecast_pass"
 export DB_NAME="forecast_db"
 
 export DIR_BUILD="./build"
-export DIR_BUILD_BENCHBASE="${DIR_BUILD}/benchbase"
+export DIR_BUILD_BENCHBASE="./benchbase"
 
 export BENCHBASE_URL="https://github.com/cmu-db/benchbase.git"
 export BENCHMARK="tpcc"
@@ -18,35 +20,31 @@ export ROOT_DIR=$(pwd)
 
 export ARTIFACT_CONFIG="${ROOT_DIR}/artifacts/${BENCHMARK}_config.xml"
 
-sudo rm -rf artifacts build
+rm -rf artifacts build
 mkdir -p ${DIR_TRAIN}
 mkdir -p ${DIR_EVAL}
 
 sudo --validate
-echo "If error, please run: create user ${DB_USER} with superuser encrypted password '${DB_PASS}'";
-
-# Disable logging.
-PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='stderr'"
-PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET logging_collector='off'"
-PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='none'"
-PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='off'"
-PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='off'"
-# sudo systemctl restart postgresql
-brew services restart postgresql
-until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
+sudo --login -u postgres psql -c "drop database if exists ${DB_NAME};"
+sudo --login -u postgres psql -c "drop user if exists ${DB_USER};"
+sudo --login -u postgres psql -c "create user ${DB_USER} with superuser encrypted password '${DB_PASS}';"
 
 PGPASSWORD=${DB_PASS} dropdb --if-exists --host=localhost --username=${DB_USER} ${DB_NAME}
 PGPASSWORD=${DB_PASS} createdb --host=localhost --username=${DB_USER} ${DB_NAME}
 
 # BenchBase: get, build, extract.
-rm -rf ${DIR_BUILD_BENCHBASE}
-git clone ${BENCHBASE_URL} --depth 1 --branch main --single-branch ${DIR_BUILD_BENCHBASE}
-cd ${DIR_BUILD_BENCHBASE}
-./mvnw clean package -Dmaven.test.skip=true -P postgres
-cd -
-cd ${DIR_BUILD_BENCHBASE}/target
-tar xvzf benchbase-postgres.tgz
-cd -
+# Use a cached copy if available since we don't update BenchBase much.
+# rm -rf ${DIR_BUILD_BENCHBASE}
+if [ ! -d ${DIR_BUILD_BENCHBASE} ]
+then
+    git clone ${BENCHBASE_URL} --depth 1 --branch main --single-branch ${DIR_BUILD_BENCHBASE}
+    cd ${DIR_BUILD_BENCHBASE}
+    ./mvnw clean package -Dmaven.test.skip=true -P postgres
+    cd -
+    cd ${DIR_BUILD_BENCHBASE}/target
+    tar xvzf benchbase-postgres.tgz
+    cd -
+fi
 
 # Copy and modify BenchBase config.
 cp ${DIR_BUILD_BENCHBASE}/target/benchbase-postgres/config/postgres/sample_${BENCHMARK}_config.xml ${ARTIFACT_CONFIG}
@@ -70,7 +68,7 @@ cd -
 PGPASSWORD=${DB_PASS} pg_dump --host=localhost --username=${DB_USER} --format=directory --file=${DIR_DUMP} ${DB_NAME}
 
 # Clear old log files.
-sudo bash -c "rm -rf /usr/local/var/postgres/log/*"
+sudo bash -c "rm -rf /var/lib/postgresql/14/main/log/*"
 
 # Enable logging.
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='csvlog'"
@@ -78,18 +76,16 @@ PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='all'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='on'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='on'"
-# sudo systemctl restart postgresql
-brew services restart postgresql
+sudo systemctl restart postgresql
 until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
 
-# Run Benchbase. Uses NoisePage-Pilot.
+# Run Benchbase.
 cd ${DIR_BUILD_BENCHBASE}/target/benchbase-postgres
 java -jar benchbase.jar -b ${BENCHMARK} -c ${ARTIFACT_CONFIG} --execute=true
 cd -
 
 # Copy the log files.
-# sudo bash -c "cat /var/lib/postgresql/14/main/log/*.csv > ${DIR_TRAIN}/query_log.csv"
-sudo bash -c "cat /usr/local/var/postgres/log/*.csv > ${DIR_TRAIN}/query_log.csv"
+sudo bash -c "cat /var/lib/postgresql/14/main/log/*.csv > ${DIR_TRAIN}/query_log.csv"
 
 # Disable logging.
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='stderr'"
@@ -97,8 +93,7 @@ PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='none'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='off'"
 PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='off'"
-# sudo systemctl restart postgresql
-brew services restart postgresql
+sudo systemctl restart postgresql
 until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
 
 # Restore from dump.
@@ -110,81 +105,50 @@ PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=${DB_USER} --clean 
 
 # Run pipeline to create a forecast.
 # Ideally, we would then create a query log to replay at this point, but pgreplay barfs too hard.
-python ./convert_postgresql_to_split_postgresql.py
-python ./convert_split_postgresql_to_parquet.py
-python ./convert_parquet_to_split_parquet.py
-#python ./convert_parquet_to_forecast.py
-#
-## ---
-## Evaluation.
-## ---
-#
-## Compress the train log.
-#pgreplay -f -c -o "${DIR_EVAL}/pgreplay_train.out" "./artifacts/tmp/data/train.csv"
-## Compress the future log.
-#pgreplay -f -c -o "${DIR_EVAL}/pgreplay_future.out" "./artifacts/tmp/data/future.csv"
-#
-## --
-## Forecast log.
-## ---
-#
-## Restore from dump.
-#PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=${DB_USER} --clean --if-exists --dbname=${DB_NAME} ${DIR_DUMP}
-#sudo systemctl restart postgresql
-## Replay the forecast log.
-#PGUSER=${DB_USER} pgreplay -r -h localhost -p 5432 -W ${DB_PASS} "${DIR_EVAL}/pgreplay_train.out"
-#python3 ./convert_forecast_to_query_log.py
-## Capture metrics.
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="CREATE EXTENSION IF NOT EXISTS pg_buffercache;"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --file=./inspect_bufferpool.sql --output=./psql_forecast_log.csv --csv
-#
-## Dump the database.
-#PGPASSWORD=${DB_PASS} pg_dump --host=localhost --username=${DB_USER} --format=directory --file="./artifacts/forecast_dump" ${DB_NAME}
-#
-## ---
-## Future log.
-## ---
-#
-## Restore from dump.
-#PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=${DB_USER} --clean --if-exists --dbname=${DB_NAME} ${DIR_DUMP}
-#sudo systemctl restart postgresql
-## Replay the forecast log.
-#PGUSER=${DB_USER} pgreplay -r -h localhost -p 5432 -W ${DB_PASS} "${DIR_EVAL}/pgreplay_train.out"
-#PGUSER=${DB_USER} pgreplay -r -h localhost -p 5432 -W ${DB_PASS} "${DIR_EVAL}/pgreplay_future.out"
-## Capture metrics.
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="CREATE EXTENSION IF NOT EXISTS pg_buffercache;"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --file=./inspect_bufferpool.sql --output=./psql_future_log.csv --csv
-#
-## Dump the database.
-#PGPASSWORD=${DB_PASS} pg_dump --host=localhost --username=${DB_USER} --format=directory --file="./artifacts/future_dump" ${DB_NAME}
-#
-## Old dead code.
+python3 ./convert_postgresql_to_split_postgresql.py
+python3 ./convert_split_postgresql_to_parquet.py
+python3 ./convert_parquet_to_split_parquet.py
+python3 ./convert_parquet_to_forecast.py
 
-## Compress the forecast log.
-## TODO(WAN): Useless.
-# pgreplay -f -c -o "${DIR_EVAL}/pgreplay_forecast.out" "${DIR_EVAL}/forecast_log.csv"
-## Clear old log files.
-#sudo bash -c "rm -rf /var/lib/postgresql/14/main/log/*"
-#
-## Enable logging.
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='csvlog'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET logging_collector='on'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='all'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='on'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='on'"
-#sudo systemctl restart postgresql
-#until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
-#
-#python3 ./convert_forecast_to_query_log.py
-#
-## Disable logging.
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_destination='stderr'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET logging_collector='off'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_statement='none'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_connections='off'"
-#PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="ALTER SYSTEM SET log_disconnections='off'"
-#sudo systemctl restart postgresql
-#until PGPASSWORD=${DB_PASS} pg_isready --host=localhost --dbname=${DB_NAME} --username=${DB_USER} ; do sleep 1 ; done
-#
-## Copy the log files.
-#sudo bash -c "cat /var/lib/postgresql/14/main/log/*.csv > ${DIR_EVAL}/forecast_log.csv"
+# ---
+# Evaluation.
+# ---
+
+# # Compress the train log.
+# pgreplay -f -c -o "${DIR_EVAL}/pgreplay_train.out" "./artifacts/tmp/data/train.csv"
+# # Compress the future log.
+# pgreplay -f -c -o "${DIR_EVAL}/pgreplay_future.out" "./artifacts/tmp/data/future.csv"
+
+# # --
+# # Forecast log.
+# # ---
+
+# # Restore from dump.
+# PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=${DB_USER} --clean --if-exists --dbname=${DB_NAME} ${DIR_DUMP}
+# sudo systemctl restart postgresql
+# # Replay the forecast log.
+# PGUSER=${DB_USER} pgreplay -r -h localhost -p 5432 -W ${DB_PASS} "${DIR_EVAL}/pgreplay_train.out"
+# python3 ./convert_forecast_to_query_log.py
+# # Capture metrics.
+# PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="CREATE EXTENSION IF NOT EXISTS pg_buffercache;"
+# PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --file=./inspect_bufferpool.sql --output=./psql_forecast_log.csv --csv
+
+# # Dump the database.
+# PGPASSWORD=${DB_PASS} pg_dump --host=localhost --username=${DB_USER} --format=directory --file="./artifacts/forecast_dump" ${DB_NAME}
+
+# # ---
+# # Future log.
+# # ---
+
+# # Restore from dump.
+# PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=${DB_USER} --clean --if-exists --dbname=${DB_NAME} ${DIR_DUMP}
+# sudo systemctl restart postgresql
+# # Replay the forecast log.
+# PGUSER=${DB_USER} pgreplay -r -h localhost -p 5432 -W ${DB_PASS} "${DIR_EVAL}/pgreplay_train.out"
+# PGUSER=${DB_USER} pgreplay -r -h localhost -p 5432 -W ${DB_PASS} "${DIR_EVAL}/pgreplay_future.out"
+# # Capture metrics.
+# PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --command="CREATE EXTENSION IF NOT EXISTS pg_buffercache;"
+# PGPASSWORD=${DB_PASS} psql --host=localhost --dbname=${DB_NAME} --username=${DB_USER} --file=./inspect_bufferpool.sql --output=./psql_future_log.csv --csv
+
+# # Dump the database.
+# PGPASSWORD=${DB_PASS} pg_dump --host=localhost --username=${DB_USER} --format=directory --file="./artifacts/future_dump" ${DB_NAME}

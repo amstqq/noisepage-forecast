@@ -25,6 +25,12 @@ DB_CONN_STRING = f"host=127.0.0.1 port=5432 dbname={DEFAULT_DB} user={DEFAULT_US
 TXN_AWARE_PARAM_NEW_VAL_TOKEN = "new_val"  # New value token in parameter transition dictionary
 TXN_AWARE_PARAM_FORECAST = True  # Whether to use txn-aware forecasting
 
+# Database schema types
+SCHEMA_INT = 0
+SCHEMA_NUMERIC = 1
+SCHEMA_STRING = 2
+SCHEMA_TIMESTAMP = 3
+
 PG_LOG_DTYPES = {
     "log_time": str,
     "user_name": str,
