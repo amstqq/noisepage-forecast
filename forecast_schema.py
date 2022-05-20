@@ -5,8 +5,9 @@ from constants import DB_CONN_STRING, SCHEMA_INT, SCHEMA_NUMERIC, SCHEMA_STRING,
 
 
 class ColumnSchema:
-    def __init__(self, column_name, column_type, nullable) -> None:
-        self._name = column_name
+    def __init__(self, column_name, table_name, column_type, nullable) -> None:
+        self._column_name = column_name
+        self._table_name = table_name
         self._type = column_type
         self._nullable = nullable
         self._unique = False
@@ -21,7 +22,7 @@ class ColumnSchema:
         return str(self)
 
     def __str__(self):
-        return f"ColumnSchema[{self._name}, {self._type}, {self._unique}]"
+        return f"ColumnSchema[{self._table_name}.{self._column_name}, {self._type}, {self._unique}]"
 
 
 class TableSchema:
@@ -63,7 +64,31 @@ class TableSchema:
         return return_str
 
 
-def main():
+def add_column(db_schema, column_constraints, column_name, table_name, column_type, nullable):
+    assert column_name not in db_schema, "Column already seen before?"
+
+    column_type = column_type.lower()
+    if any(pattern in column_type for pattern in ["smallint", "integer", "bigint"]):
+        column_type = SCHEMA_INT
+    elif any(pattern in column_type for pattern in ["numeric", "double precision", "decimal", "real"]):
+        column_type = SCHEMA_NUMERIC
+    elif any(pattern in column_type for pattern in ["character", "character varying", "text"]):
+        column_type = SCHEMA_STRING
+    elif any(pattern in column_type for pattern in ["timestamp", "date", "time"]):
+        column_type = SCHEMA_TIMESTAMP
+    else:
+        print(f"No handler exists for type: {column_type}")
+        raise RuntimeError
+
+    column_schema = ColumnSchema(column_name, table_name, column_type, nullable)
+
+    if column_name in column_constraints:
+        column_schema.set_unique(True)
+
+    db_schema[column_name] = column_schema
+
+
+def get_database_schema():
     table_names_query = """
     SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';
     """
@@ -91,10 +116,12 @@ def main():
     INNER JOIN pg_attribute a
                        ON a.attrelid = con.conrelid
                           AND a.attnum = ak.k
-    WHERE rel.relname = %s AND (con.contype = 'p' or con.contype='u');
+    WHERE rel.relname = %s AND (con.contype = 'p' or con.contype = 'u');
     """
 
+    # Currently assume column names are unique. Map column name to ColumnSchema object.
     db_schema = {}
+
     with psycopg.connect(DB_CONN_STRING, autocommit=True) as conn:
         cur = conn.cursor()
         cur.execute(table_names_query)
@@ -117,18 +144,10 @@ def main():
 
             for column_name, column_type, nullable in column_info:
                 # print(column_name, column_type, nullable)
-                ts.add_column(column_name, column_type, nullable)
-                if column_name in column_constraints:
-                    ts.set_column_unique(column_name, True)
+                add_column(db_schema, column_constraints, column_name, table_name, column_type, nullable)
 
-            db_schema[table_name] = ts
-
-            # print(ts)
-    print(db_schema)
-
-    with open("db_schema.pkl", "wb") as f:
-        pickle.dump(db_schema, f)
+    return db_schema
 
 
 if __name__ == "__main__":
-    main()
+    get_database_schema()

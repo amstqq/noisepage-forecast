@@ -2,6 +2,8 @@ from forecast_models import ForecastModelABC
 from distfit import distfit
 from tqdm import tqdm
 import numpy as np
+from sql_metadata import Parser
+
 
 from collections import defaultdict
 from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN
@@ -73,6 +75,11 @@ class DistfitModel(ForecastModelABC):
             if fit_type == "distfit":
                 dist = fit_obj["distfit"]
                 param_val = str(dist.generate(n=1, verbose=0)[0])
+
+                # Use schema to determine data type of this parameter
+                p = Parser(query_template)
+                tables = p.tables
+                columns = p.columns
             else:
                 assert fit_type == "sample"
                 param_val = np.random.choice(fit_obj["sample"])
@@ -88,7 +95,7 @@ class DistfitModel(ForecastModelABC):
 
         params = {}
         for param_idx in self.model[query_template]:
-            # Extract dependencies of current parameters wrt. all parameters seen in sample_path
+            # Extract dependencies of current parameters wrt all parameters seen in sample_path
             qtp_enc = f"{query_template_encoding}_{param_idx}"
 
             # Current parameter does not exist in transition dict
@@ -115,6 +122,10 @@ class DistfitModel(ForecastModelABC):
                 splits = qtp_enc_most_recent.split("_")
                 qt_enc = int(splits[0])
                 nth_most_recent = int(splits[2])
+
+                # qt_encs_count[qt_enc] contains how many times each qt appears in sample path.
+                # Given a target qt_enc_most_recent, if this qt appeared 3 times, then up to
+                # 3rd most recently seen qt_enc is considered as final candicate for transition
                 if qt_enc in qt_encs_count and nth_most_recent <= qt_encs_count[qt_enc]:
                     final_candidates.append(qtp_enc_most_recent)
                     final_probs.append(transition_params[qtp_enc][qtp_enc_most_recent])

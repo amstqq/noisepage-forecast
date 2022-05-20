@@ -34,3 +34,4 @@ dist/
 fmd.pkl
 db_schema.pkl
 benchbase/
+.vscode/

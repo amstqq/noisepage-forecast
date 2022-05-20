@@ -107,8 +107,8 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
         pickle.dump(metadata, f)
 
     forecast_arrivals = generate_forecast_arrivals(fmd, target_timestamp, granularity, plot)
-    model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
-    # model = fmd.get_cache()["forecast_model"]["distfit"]
+    # model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
+    model = fmd.get_cache()["forecast_model"]["distfit"]
 
     for i, row in tqdm(
         forecast_arrivals.iterrows(),
@@ -149,6 +149,7 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                 probs = np.array([v["weight"] for _, v in transitions])
                 probs = probs / np.sum(probs)
                 qte_cur = np.random.choice(candidate_templates, p=probs)
+
                 # The first query of a sample path (other than BEGIN) is used to identify
                 # a transaction.
                 if first_qte == None:
@@ -186,25 +187,22 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
 
 
 def main():
-    # import os
-    # os.environ['KMP_DUPLICATE_LIB_OK']='True'
-
-    fmd = ForecastMD()
-    pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
-    print(f"Parquet files: {pq_files}")
-    for pq_file in tqdm(pq_files, desc="Reading Parquet files.", disable=True):
-        df = pd.read_parquet(pq_file)
-        df["log_time"] = df["log_time"].dt.tz_convert("UTC")
-        print(f"{pq_file} has timestamps from {df['log_time'].min()} to {df['log_time'].max()}.")
-        df["query_template"] = df["query_template"].replace("", np.nan)
-        dropna_before = df.shape[0]
-        df = df.dropna(subset=["query_template"])
-        dropna_after = df.shape[0]
-        print(
-            f"Dropped {dropna_before - dropna_after} empty query template rows in {pq_file}. {dropna_after} rows remain."
-        )
-        fmd.augment(df)
-    fmd.save("fmd.pkl")
+    # fmd = ForecastMD()
+    # pq_files = [Path(DEBUG_POSTGRESQL_PARQUET_TRAIN)]
+    # print(f"Parquet files: {pq_files}")
+    # for pq_file in tqdm(pq_files, desc="Reading Parquet files.", disable=True):
+    #     df = pd.read_parquet(pq_file)
+    #     df["log_time"] = df["log_time"].dt.tz_convert("UTC")
+    #     print(f"{pq_file} has timestamps from {df['log_time'].min()} to {df['log_time'].max()}.")
+    #     df["query_template"] = df["query_template"].replace("", np.nan)
+    #     dropna_before = df.shape[0]
+    #     df = df.dropna(subset=["query_template"])
+    #     dropna_after = df.shape[0]
+    #     print(
+    #         f"Dropped {dropna_before - dropna_after} empty query template rows in {pq_file}. {dropna_after} rows remain."
+    #     )
+    #     fmd.augment(df)
+    # fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")
 
@@ -226,6 +224,13 @@ def main():
         from fm_jackie import Jackie1m1p
 
         cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
+        fmd.save("fmd.pkl")
+
+    # database schema
+    if "db_schema" not in cache:
+        from forecast_schema import get_database_schema
+
+        cache["db_schema"] = get_database_schema()
         fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")

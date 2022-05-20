@@ -247,7 +247,11 @@ class ForecastMD:
         group_id, df = item
         qt_encs = df["query_template_enc"].values
         qt_encs = np.concatenate(
-            [self.qt_enc.transform([self.SESSION_BEGIN]), qt_encs, self.qt_enc.transform([self.SESSION_END]),]
+            [
+                self.qt_enc.transform([self.SESSION_BEGIN]),
+                qt_encs,
+                self.qt_enc.transform([self.SESSION_END]),
+            ]
         )
         return group_id, qt_encs
 
