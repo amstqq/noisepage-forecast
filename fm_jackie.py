@@ -18,7 +18,7 @@ from pathlib import Path
 
 from forecast_models import ForecastModelABC
 from forecast_metadata import QueryTemplateMD, ForecastMD
-from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN
+from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN, SCHEMA_INT, SCHEMA_TIMESTAMP
 
 from typing import Tuple
 from collections import defaultdict
@@ -172,7 +172,12 @@ class Jackie1m1p(ForecastModelABC):
                     print(f"Warning: not enough data ({X.shape=}), will double up rows: {qt}.")
                     X = np.concatenate([X, X])
                     Y = np.concatenate([Y, Y])
-                X_train, X_test, Y_train, Y_test = train_test_split(X, Y, shuffle=False, test_size=0.1,)
+                X_train, X_test, Y_train, Y_test = train_test_split(
+                    X,
+                    Y,
+                    shuffle=False,
+                    test_size=0.1,
+                )
                 X_train, Y_train = X, Y
 
                 # X: (N, seq_len, num_quantiles) to (seq_len, N, num_quantiles).
@@ -280,9 +285,10 @@ class Jackie1m1p(ForecastModelABC):
         return params
 
     def generate_parameters_txn_aware(
-        self, query_template, query_template_encoding, timestamp, transition_params, sample_path
+        self, query_template, query_template_encoding, timestamp, transition_params, db_schema, sample_path
     ):
         target_timestamp = pd.Timestamp(timestamp)
+        param_data_types = self.get_parameter_data_types(db_schema, query_template)
 
         # Dict that maps how many times each query template appears in sample_path. This is used
         # to filter the parameter transition dict, since a parameter might depend on many different
@@ -317,6 +323,14 @@ class Jackie1m1p(ForecastModelABC):
             # param_val is None, meaning a new value should be generated from the forecast model
             param_val = self._get_parameter_from_forecast_model(fit_obj, target_timestamp)
             assert param_val is not None
+
+            # Cast param_val to corresponding data type
+            if param_data_types[param_idx - 1] == SCHEMA_INT:
+                param_val = round(param_val)
+            elif param_data_types[param_idx - 1] == SCHEMA_TIMESTAMP:
+                param_val = pd.to_datetime(param_val, unit="ms")
+                param_val = param_val.dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
             # Param dict values must be quoted for consistency.
             params[f"${param_idx}"] = f"'{param_val}'"
 
@@ -325,7 +339,7 @@ class Jackie1m1p(ForecastModelABC):
     def _get_parameter_from_transition_dict(
         self, query_template_encoding, transition_params, sample_path, param_idx, qt_encs_count
     ):
-        """Get a parameter value by examining what previous parameters it depends on. Return None if 
+        """Get a parameter value by examining what previous parameters it depends on. Return None if
         no dependency is found, and a value should be generated from the forecast model.
 
         Args:
@@ -338,7 +352,7 @@ class Jackie1m1p(ForecastModelABC):
         Returns:
             str: value of parameter, None if no dependency found
         """
-        # Extract dependencies of current parameters wrt. all parameters seen in sample_path
+        # Extract dependencies of current parameters wrt all parameters seen in sample_path
         qtp_enc = f"{query_template_encoding}_{param_idx}"
 
         # Current parameter does not exist in transition dict

@@ -2,11 +2,11 @@ from forecast_models import ForecastModelABC
 from distfit import distfit
 from tqdm import tqdm
 import numpy as np
-from sql_metadata import Parser
+import pandas as pd
 
 
 from collections import defaultdict
-from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN
+from constants import TXN_AWARE_PARAM_NEW_VAL_TOKEN, SCHEMA_INT, SCHEMA_NUMERIC, SCHEMA_STRING, SCHEMA_TIMESTAMP
 
 
 class DistfitModel(ForecastModelABC):
@@ -65,26 +65,29 @@ class DistfitModel(ForecastModelABC):
         return params
 
     def generate_parameters_txn_aware(
-        self, query_template, query_template_encoding, timestamp, transition_params, sample_path
+        self, query_template, query_template_encoding, timestamp, transition_params, db_schema, sample_path
     ):
-        def sample_new_param(query_template, param_idx):
+        def sample_new_param(query_template, param_data_types, param_idx):
             fit_obj = self.model[query_template][param_idx]
             fit_type = fit_obj["type"]
 
             param_val = None
             if fit_type == "distfit":
                 dist = fit_obj["distfit"]
-                param_val = str(dist.generate(n=1, verbose=0)[0])
+                param_val = dist.generate(n=1, verbose=0)[0]
 
-                # Use schema to determine data type of this parameter
-                p = Parser(query_template)
-                tables = p.tables
-                columns = p.columns
+                if param_data_types[param_idx - 1] == SCHEMA_INT:
+                    param_val = round(param_val)
+                elif param_data_types[param_idx - 1] == SCHEMA_TIMESTAMP:
+                    param_val = pd.to_datetime(param_val, unit="ms")
+                    param_val = param_val.dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             else:
                 assert fit_type == "sample"
                 param_val = np.random.choice(fit_obj["sample"])
             assert param_val is not None
-            return param_val
+            return str(param_val)
+
+        param_data_types = self.get_parameter_data_types(db_schema, query_template)
 
         # Dict that maps how many times each query template appears in sample_path. This is used
         # to filter the parameter transition dict, since a parameter might depend on many different
@@ -100,7 +103,7 @@ class DistfitModel(ForecastModelABC):
 
             # Current parameter does not exist in transition dict
             if qtp_enc not in transition_params:
-                param_val = sample_new_param(query_template, param_idx)
+                param_val = sample_new_param(query_template, param_data_types, param_idx)
                 # Param dict values must be quoted for consistency.
                 params[f"${param_idx}"] = f"'{param_val}'"
                 continue
@@ -132,7 +135,7 @@ class DistfitModel(ForecastModelABC):
 
             # If current parameter does not depend on any previous parameter, then sample a new one
             if len(final_candidates) == 0:
-                param_val = sample_new_param(query_template, param_idx)
+                param_val = sample_new_param(query_template, param_data_types, param_idx)
                 params[f"${param_idx}"] = f"'{param_val}'"
                 continue
 
@@ -142,7 +145,7 @@ class DistfitModel(ForecastModelABC):
 
             # Selected transition is NEW_VAL_TOKEN, meaning a new value is to be sampled
             if qtp_enc_most_recent == TXN_AWARE_PARAM_NEW_VAL_TOKEN:
-                param_val = sample_new_param(query_template, param_idx)
+                param_val = sample_new_param(query_template, param_data_types, param_idx)
                 params[f"${param_idx}"] = f"'{param_val}'"
                 continue
 

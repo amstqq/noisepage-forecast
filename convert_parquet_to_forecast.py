@@ -107,8 +107,8 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
         pickle.dump(metadata, f)
 
     forecast_arrivals = generate_forecast_arrivals(fmd, target_timestamp, granularity, plot)
-    # model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
-    model = fmd.get_cache()["forecast_model"]["distfit"]
+    model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
+    # model = fmd.get_cache()["forecast_model"]["distfit"]
 
     for i, row in tqdm(
         forecast_arrivals.iterrows(),
@@ -159,7 +159,12 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                 qt_cur = fmd.qt_enc.inverse_transform(qte_cur)
                 if TXN_AWARE_PARAM_FORECAST:
                     params_cur = model.generate_parameters_txn_aware(
-                        qt_cur, qte_cur, current_session_ts, fmd.txn_to_transition_params[first_qte], sample_path
+                        qt_cur,
+                        qte_cur,
+                        current_session_ts,
+                        fmd.txn_to_transition_params[first_qte],
+                        fmd.get_cache()["db_schema"],
+                        sample_path,
                     )
                 else:
                     params_cur = model.generate_parameters(qt_cur, current_session_ts)
@@ -227,11 +232,11 @@ def main():
         fmd.save("fmd.pkl")
 
     # database schema
-    if "db_schema" not in cache:
-        from forecast_schema import get_database_schema
+    # if "db_schema" not in cache:
+    from forecast_schema import get_database_schema
 
-        cache["db_schema"] = get_database_schema()
-        fmd.save("fmd.pkl")
+    cache["db_schema"] = get_database_schema()
+    fmd.save("fmd.pkl")
 
     fmd = ForecastMD.load("fmd.pkl")
 

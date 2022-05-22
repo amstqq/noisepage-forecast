@@ -38,7 +38,7 @@ class ForecastModelABC(ABC):
 
     @abstractmethod
     def generate_parameters_txn_aware(
-        self, query_template, query_template_encoding, timestamp, transition_params, sample_path
+        self, query_template, query_template_encoding, timestamp, transition_params, db_schema, sample_path
     ):
         """Generate a set of txn-aware parameters for the specified query template as of the specified time.
 
@@ -60,13 +60,20 @@ class ForecastModelABC(ABC):
             r = re.compile(r"\(([^\$]+)\)")
             param_cols = r.findall(query_template)[0]
             param_cols = param_cols.split(", ")
+            param_cols = [param_col.lower() for param_col in param_cols]
         else:
             # UPDATE warehouse SET W_YTD = W_YTD + $1 WHERE W_ID = $2
             # Extract column name such as W_YTD and W_ID from query temmplate
-            r = re.compile(r"([\S]+) (?:=|>=|<=|>|<) (?:\S+ \+ )?\$\d+")
+            r = re.compile(r"([\S]+) (?:=|>=|<=|>|<) (?:\S+(?: \+ )?)?\$\d+")
             param_cols = r.findall(query_template)
+            param_cols = [param_col.lower() for param_col in param_cols]
 
         for param_col_name in param_cols:
+            # Some queries like 'SET extra_float_digits = $1' have no corresponding data type
+            # Just assume integer type for now
+            if param_col_name not in db_schema:
+                param_data_types.append(SCHEMA_INT)
+                continue
             param_data_types.append(db_schema[param_col_name].get_type())
         # For TPCC, LIMIT is always the last parameter in a query.
         # This might change for other benchmarks

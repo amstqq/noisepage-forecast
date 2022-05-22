@@ -15,6 +15,9 @@ class ColumnSchema:
     def get_type(self):
         return self._type
 
+    def get_unique(self):
+        return self._unique
+
     def set_unique(self, unique: bool):
         self._unique = unique
 
@@ -23,45 +26,6 @@ class ColumnSchema:
 
     def __str__(self):
         return f"ColumnSchema[{self._table_name}.{self._column_name}, {self._type}, {self._unique}]"
-
-
-class TableSchema:
-    def __init__(self, name) -> None:
-        self._name = name
-        self._column_schemas = {}  # Map column name to ColumnSchema object
-        self._columns = []
-
-    def add_column(self, column_name, column_type, nullable):
-        assert column_name not in self._columns, "Column already seen before?"
-        self._columns.append(column_name)
-
-        column_type = column_type.lower()
-        if any(pattern in column_type for pattern in ["smallint", "integer", "bigint"]):
-            column_type = SCHEMA_INT
-        elif any(pattern in column_type for pattern in ["numeric", "double precision", "decimal", "real"]):
-            column_type = SCHEMA_NUMERIC
-        elif any(pattern in column_type for pattern in ["character", "character varying", "text"]):
-            column_type = SCHEMA_STRING
-        elif any(pattern in column_type for pattern in ["timestamp", "date", "time"]):
-            column_type = SCHEMA_TIMESTAMP
-        else:
-            print(f"No handler exists for type: {column_type}")
-            raise RuntimeError
-
-        self._column_schemas[column_name] = ColumnSchema(column_name, column_type, nullable)
-
-    def set_column_unique(self, column_name, unique):
-        assert column_name in self._columns, "Column does not exist"
-        self._column_schemas[column_name].set_unique(unique)
-
-    def __repr__(self):
-        return str(self)
-
-    def __str__(self):
-        return_str = f"TableSchema[{self._name}]\n=======================\n"
-        for v in self._column_schemas.values():
-            return_str += f"{v}\n"
-        return return_str
 
 
 def add_column(db_schema, column_constraints, column_name, table_name, column_type, nullable):
@@ -130,7 +94,6 @@ def get_database_schema():
 
         for table_name in table_names:
             print(f"Processing {table_name}...")
-            ts = TableSchema(table_name)
 
             # Get all columns in this table
             cur.execute(table_schema_query, (table_name,))  # (table_name,) passed as tuple
