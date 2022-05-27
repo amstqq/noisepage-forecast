@@ -83,12 +83,13 @@ class QueryTemplateMD:
             params = np.stack(self._params)
             params = pd.DataFrame(params, index=pd.DatetimeIndex(self._params_times))
             for col in params.columns:
-                if is_datetime64_any_dtype(params[col]):
+                try:
                     params[col] = params[col].astype("datetime64")
-                elif all(params[col].str.isnumeric()):
-                    params[col] = params[col].astype(int)
-                elif all(params[col].str.replace(".", "", regex=False).str.isnumeric()):
-                    params[col] = params[col].astype(float)
+                except:
+                    if all(params[col].str.isnumeric()):
+                        params[col] = params[col].astype(int)
+                    elif all(params[col].str.replace(".", "", regex=False).str.isnumeric()):
+                        params[col] = params[col].astype(float)
             return params.convert_dtypes()
         return pd.DataFrame([], index=pd.DatetimeIndex([]))
 

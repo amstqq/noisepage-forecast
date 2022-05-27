@@ -231,6 +231,13 @@ def main():
         cache["forecast_model"]["jackie1m1p"] = Jackie1m1p().fit(fmd)
         fmd.save("fmd.pkl")
 
+    # Jackie's 1m1t model.
+    # if "jackie1m1t" not in cache["forecast_model"]:
+    from fm_1m1t import Jackie1m1t
+
+    cache["forecast_model"]["Jackie1m1t"] = Jackie1m1t().fit(fmd)
+    fmd.save("fmd.pkl")
+
     # database schema
     # if "db_schema" not in cache:
     from forecast_schema import get_database_schema
