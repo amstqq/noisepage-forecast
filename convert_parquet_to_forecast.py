@@ -107,7 +107,8 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
         pickle.dump(metadata, f)
 
     forecast_arrivals = generate_forecast_arrivals(fmd, target_timestamp, granularity, plot)
-    model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
+    model = fmd.get_cache()["forecast_model"]["jackie1m1t"]
+    # model = fmd.get_cache()["forecast_model"]["jackie1m1p"]
     # model = fmd.get_cache()["forecast_model"]["distfit"]
 
     for i, row in tqdm(
@@ -161,13 +162,13 @@ def generate_forecast(fmd, target_timestamp, granularity=pd.Timedelta(hours=1), 
                     params_cur = model.generate_parameters_txn_aware(
                         qt_cur,
                         qte_cur,
-                        current_session_ts,
+                        target_timestamp,
                         fmd.txn_to_transition_params[first_qte],
                         fmd.get_cache()["db_schema"],
                         sample_path,
                     )
                 else:
-                    params_cur = model.generate_parameters(qt_cur, current_session_ts)
+                    params_cur = model.generate_parameters(qt_cur, target_timestamp)
 
                 # Advance the time.
                 current_session_ts += pd.Timedelta(
@@ -232,11 +233,11 @@ def main():
         fmd.save("fmd.pkl")
 
     # Jackie's 1m1t model.
-    # if "jackie1m1t" not in cache["forecast_model"]:
-    from fm_1m1t import Jackie1m1t
+    if "jackie1m1t" not in cache["forecast_model"]:
+        from fm_1m1t import Jackie1m1t
 
-    cache["forecast_model"]["Jackie1m1t"] = Jackie1m1t().fit(fmd)
-    fmd.save("fmd.pkl")
+        cache["forecast_model"]["jackie1m1t"] = Jackie1m1t().fit(fmd)
+        fmd.save("fmd.pkl")
 
     # database schema
     # if "db_schema" not in cache:

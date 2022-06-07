@@ -3,6 +3,7 @@ import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
 import pandas as pd
+from copy import deepcopy
 
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
@@ -23,7 +24,7 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 
 # DeepAR config
-EPOCHS = 60  # 1 epoch for debug
+EPOCHS = 60  # TODO: 1 epoch for debug
 LR = 0.00005
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 16
@@ -131,18 +132,20 @@ class Jackie1m1t(ForecastModelABC):
 
             # Build one DeepAR model per query template
             model[qt] = {}
+            model[qt]["params_md"] = {}
+
             qt_X_train = []  # (N, window_size, num_quantiles + num_covariates)
             qt_X_test = []
             qt_Y_train = []  # (N, window_size, num_quantiles)
             qt_Y_test = []
-            # Every parameter that will be used in model training is associated with an index.
+            # Every parameter that will be used in model training is associated with a class index.
             # This index will be used as an input feature to uniquely identify the parameter.
             curr_class_index = 0
             qt_class_index_train = []  # (N, ) --> each window has a class_index
             qt_class_index_test = []
             # DeepAR scales data on a per-window basis. These arrays store the scaling factors
-            # (mean and std) for each feature in every window
-            qt_scaling_factors_train = []  # (N, num_quantiles + num_covariates, 2)
+            # (mean and std) for every window
+            qt_scaling_factors_train = []  # (N, 2)
             qt_scaling_factors_test = []
 
             # The historical parameter data is obtained in the form of a dataframe,
@@ -155,13 +158,13 @@ class Jackie1m1t(ForecastModelABC):
                 total=len(params_df.columns),
                 leave=False,
             ):
-                model[qt][param_idx] = {}
+                model[qt]["params_md"][param_idx] = {}
 
                 params: pd.Series = params_df[param_col]
                 # If the parameter is of string type, we store the values and will sample from them later.
                 if str(params.dtype) == "string":
-                    model[qt][param_idx]["type"] = "sample"
-                    model[qt][param_idx]["sample"] = params
+                    model[qt]["params_md"][param_idx]["type"] = "sample"
+                    model[qt]["params_md"][param_idx]["sample"] = params
                     continue
 
                 # Convert datetime64 type parameter to numerical value (# of seconds)
@@ -181,11 +184,17 @@ class Jackie1m1t(ForecastModelABC):
                 quantiles = {
                     qname: (lambda x, curr_qval=qval: x.quantile(curr_qval)) for qname, qval in self.quantiles_def
                 }
-                tsdf = params_df[param_col].resample(self.prediction_interval).agg(quantiles).astype("float64")
+                tsdf = (
+                    params_df[param_col]
+                    .resample(self.prediction_interval)
+                    .agg(quantiles)
+                    .fillna(method="ffill")
+                    .astype("float64")
+                )
 
                 # Duplicate if not enough data. Ensure at least one data point in history window to train model
                 # eg. [0, 0, 0, ..., 0, 5 | 6, 7, 8]
-                #              history        pred     --> at least one point in history window
+                #              history        pred     --> at least one point '5' in history window
                 min_data_needed = self.prediction_window_size + 2
                 num_new_data = min_data_needed - len(tsdf)
                 if num_new_data > 0:
@@ -223,10 +232,10 @@ class Jackie1m1t(ForecastModelABC):
                     if ridx <= self.prediction_window_size:
                         continue
 
-                    # Compute number of rows in current window that belongs to history range, not prediction range
+                    # Compute number of rows in current window that belongs to history range, not prediction range,
+                    # since scaling only depends on data in the history range, not on the prediction range.
                     num_history_range = min(ridx - self.prediction_window_size, self.history_window_size)
 
-                    # Scale factor only depends on data in the history range, not on the prediction range.
                     # Extract data in history range and compute mean/std based on this subset.
                     rw_history = rolling_window.iloc[:num_history_range]
 
@@ -237,8 +246,9 @@ class Jackie1m1t(ForecastModelABC):
                     rw_mean = params_df[param_col][rw_starttime:rw_endtime].mean()
                     rw_std = params_df[param_col][rw_starttime:rw_endtime].std()
 
-                    # Hack: if std==None (only 1 data point) or std=0, then set it to 1 so that when scaling/unscaling
-                    # data, we can simply divide/multiply by std and not encounter divide by 0 error.
+                    # Hack: if std==None (only 1 data point) or std=0 (all data are the same), then set it to 1 so that
+                    # when scaling/unscaling data, we can simply divide/multiply by std and not encounter divide by 0
+                    # error.
                     if pd.isnull(rw_std) or rw_std == 0:
                         rw_std = 1
 
@@ -272,9 +282,10 @@ class Jackie1m1t(ForecastModelABC):
                     X.append(curr_X)
                     Y.append(curr_Y)
                     scaling_factors.append(np.array([rw_mean, rw_std]))
+
                 X = np.array(X)  # (N, total_window_size, num_quantiles + num_covariates)
                 Y = np.array(Y)  # (N, total_window_size, num_quantiles)
-                scaling_factors = np.array(scaling_factors)  # (N, num_quantiles + num_covariates)
+                scaling_factors = np.array(scaling_factors)  # (N, 2)
                 curr_class_index_arr = np.full(
                     X.shape[0], curr_class_index
                 )  # All data in X have the same class index -> (N, )
@@ -286,8 +297,6 @@ class Jackie1m1t(ForecastModelABC):
                     Y = np.concatenate([Y, Y])
                     curr_class_index_arr = np.concatenate([curr_class_index_arr, curr_class_index_arr])
                     scaling_factors = np.concatenate([scaling_factors, scaling_factors])
-                # X_train: (N, total_window_size, num_quantiles + num_covariates)
-                # Y_train: (N, total_window_size, num_quantiles)
                 X_train, X_test, Y_train, Y_test = train_test_split(
                     X,
                     Y,
@@ -310,13 +319,16 @@ class Jackie1m1t(ForecastModelABC):
                 qt_scaling_factors_test.append(scaling_factors_test)
 
                 # Save data for future use
-                model[qt][param_idx]["type"] = "jackie1m1t"
-                model[qt][param_idx]["jackie1m1t"] = {}
-                model[qt][param_idx]["jackie1m1t"]["X"] = X
-                model[qt][param_idx]["jackie1m1t"]["X_ts"] = tsdf.index
-                model[qt][param_idx]["jackie1m1t"]["scaling_factors"] = scaling_factors
-                model[qt][param_idx]["jackie1m1t"]["class_index"] = curr_class_index
-                model[qt][param_idx]["jackie1m1t"]["covariate_scaling_factors"] = [timestamp_mean, timestamp_std]
+                model[qt]["params_md"][param_idx]["type"] = "jackie1m1t"
+                model[qt]["params_md"][param_idx]["jackie1m1t"] = {}
+                model[qt]["params_md"][param_idx]["jackie1m1t"]["param_df"] = params_df[param_col]
+                model[qt]["params_md"][param_idx]["jackie1m1t"]["quantile_df"] = tsdf
+                model[qt]["params_md"][param_idx]["jackie1m1t"]["scaling_factors"] = scaling_factors
+                model[qt]["params_md"][param_idx]["jackie1m1t"]["class_index"] = curr_class_index
+                model[qt]["params_md"][param_idx]["jackie1m1t"]["timestamp_scaling_factors"] = [
+                    timestamp_mean,
+                    timestamp_std,
+                ]
 
                 # Add 1 to class index
                 curr_class_index += 1
@@ -346,7 +358,7 @@ class Jackie1m1t(ForecastModelABC):
                 LSTM_LAYERS,
                 LSTM_DROPOUT,
                 EMBEDDING_DIM,
-                curr_class_index + 1,
+                curr_class_index + 1,  # Total # parameters
                 DEVICE,
             ).to(DEVICE)
             optimizer = optim.Adam(deepar_model.parameters(), lr=LR)
@@ -355,9 +367,9 @@ class Jackie1m1t(ForecastModelABC):
                 optimizer, factor=0.75, patience=1, verbose=True, threshold=1e-2
             )
 
-            best_vloss = float("inf")
-            best_model_state_dict = None
             # Early stopping: if vloss does not decrease for multiple iterations, stop training
+            best_vloss = float("inf")
+            best_model = None
             increase_vloss_count = 0
             for epoch in range(EPOCHS):
                 train_loss = self._train_epoch(deepar_model, train_loader, optimizer, criterion)
@@ -369,14 +381,14 @@ class Jackie1m1t(ForecastModelABC):
                 if val_loss < best_vloss:
                     increase_vloss_count = 0
                     best_vloss = val_loss
-                    best_model_state_dict = deepar_model.state_dict()
+                    best_model = deepcopy(deepar_model)
                 else:
                     increase_vloss_count += 1
                     if increase_vloss_count == EARLY_STOPPING_TOLERANCE:
                         break
                 scheduler.step(val_loss)
                 torch.cuda.empty_cache()
-            model[qt]["state_dict"] = best_model_state_dict
+            model[qt]["model"] = best_model
         self.model = model
         return self
 
@@ -469,8 +481,8 @@ class Jackie1m1t(ForecastModelABC):
 
         # Generate the parameters.
         params = {}
-        for param_idx in self.model[query_template]:
-            fit_obj = self.model[query_template][param_idx]
+        for param_idx in self.model[query_template]["params_md"]:
+            fit_obj = self.model[query_template]["params_md"][param_idx]
             fit_type = fit_obj["type"]
 
             param_val = None
@@ -491,15 +503,15 @@ class Jackie1m1t(ForecastModelABC):
                 continue
 
             # param_val is None, meaning a new value should be generated from the forecast model
-            param_val = self._get_parameter_from_forecast_model(fit_obj, target_timestamp)
+            qt_model = self.model[query_template]["model"]
+            param_val = self._get_parameter_from_forecast_model(qt_model, fit_obj, target_timestamp)
             assert param_val is not None
 
             # Cast param_val to corresponding data type
             if param_data_types[param_idx - 1] == SCHEMA_INT:
                 param_val = round(param_val)
             elif param_data_types[param_idx - 1] == SCHEMA_TIMESTAMP:
-                param_val = pd.to_datetime(param_val, unit="ms")
-                param_val = param_val.dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                param_val = pd.to_datetime(param_val, format="%Y-%m-%d %H:%M:%S.%f")
 
             # Param dict values must be quoted for consistency.
             params[f"${param_idx}"] = f"'{param_val}'"
@@ -580,65 +592,96 @@ class Jackie1m1t(ForecastModelABC):
 
         return param_val
 
-    def _get_parameter_from_forecast_model(self, fit_obj, target_timestamp):
+    def _get_parameter_from_forecast_model(self, model, fit_obj, target_timestamp):
         """Generate a parameter value from the corresponding fit_obj, by continously unrolling
         RNN until target_timestamp.
         """
+        param_df = fit_obj["jackie1m1t"]["param_df"]
+        quantile_df = fit_obj["jackie1m1t"]["quantile_df"]
+        quantile_timestamp = quantile_df.index
+        params_ts_scaling_factors = fit_obj["jackie1m1t"]["timestamp_scaling_factors"]  # (2, )
+        timestamp_mean, timestamp_std = params_ts_scaling_factors[0], params_ts_scaling_factors[1]
+        params_class_index = fit_obj["jackie1m1t"]["class_index"]
 
-        param_model = fit_obj["jackie1m1p"]["model"]
-        param_mean = fit_obj["jackie1m1p"]["mean"]
-        param_std = fit_obj["jackie1m1p"]["std"]
-        param_X = fit_obj["jackie1m1p"]["X"]
-        param_X_ts = fit_obj["jackie1m1p"]["X_ts"]
+        assert (len(quantile_timestamp) > 0, "Must have at least 1 historical data point when generating data")
 
-        start_timestamp_idx = -1
+        # Get start and end timestamp of a training window.
         # If the start timestamp was within in the training data, use the last value before said timestamp.
-        candidate_indexes = np.argwhere(param_X_ts <= target_timestamp)
+        window_end_idx = len(quantile_timestamp) - 1
+        candidate_indexes = np.argwhere(quantile_timestamp <= target_timestamp)
         if candidate_indexes.shape[0] != 0:
-            start_timestamp_idx = candidate_indexes.max()
-        start_timestamp = param_X_ts[start_timestamp_idx]
+            window_end_idx = candidate_indexes.max()
+        window_start_idx = max(0, window_end_idx - self.history_window_size + 1)
+        window_start_ts = quantile_timestamp.to_numpy()[window_start_idx]
+        window_end_ts = quantile_timestamp.to_numpy()[window_end_idx] + self.prediction_interval
 
-        # seq : (seq_len, num_quantiles)
-        seq = param_X[start_timestamp_idx]
-        # seq : (1, seq_len, num_quantiles)
-        seq = seq[None, :, :]
-        # seq : (seq_len, 1, num_quantiles)
-        seq = np.transpose(seq, (1, 0, 2))
-        seq = torch.tensor(seq).to(DEVICE).float()
+        # Retrieve `history_window_size` data points before `start_timestamp`. This is the data in training window
+        # The quantile data are not scaled, but known covariates (timestamps) are scaled
+        # (history_window_size, quantile_dim+cov_dim)
+        seq = quantile_df[window_start_ts:window_end_ts].to_numpy()
 
-        # TODO(WAN): cache predicted values.
+        assert (
+            seq.shape[0] == self.history_window_size,
+            "Wrong number of data points in window when genrating predictions",
+        )
 
-        # Predict until the target timestamp is reached.
-        pred = seq[-1, -1, :]
-        pred = torch.cummax(pred, dim=0).values
-        num_predictions = int((target_timestamp - start_timestamp) / self.prediction_interval)
-        for _ in range(num_predictions):
-            # Predict the quantiles from the model.
-            with torch.no_grad():
-                pred = param_model(seq)
+        # Compute window mean/std using data from param_df. Then scale the quantile part of the window
+        # using these factors.
+        window_mean = param_df[window_start_ts:window_end_ts].mean()
+        window_std = param_df[window_start_ts:window_end_ts].std()
+        if pd.isnull(window_std) or window_std == 0:
+            window_std = 1
+        seq[:, : len(self.quantiles_def)] = (seq[:, : len(self.quantiles_def)] - window_mean) / window_std
 
-            # Ensure prediction quantile values are strictly increasing.
-            pred = pred[-1, -1, :]
-            pred = torch.cummax(pred, dim=0).values
+        # Pad the window to `history_window_size` if needed
+        # Pad the windows to total_window_size if needed
+        num_pad_before = max(0, self.history_window_size - seq.shape[0])
+        pad_width = ((num_pad_before, 0), (0, 0))
+        seq = np.pad(seq, pad_width)
 
-            # Add pred to original seq to create new seq for next time stamp.
-            seq = torch.squeeze(seq, axis=1)
-            seq = torch.cat((seq[1:, :], pred[None, :]), axis=0)
-            seq = seq[:, None, :]
+        # We want to make `seq` to have shape (total_window_size, quantile_dim+cov_dim).
+        # Pad seq with `num_predictions` rows of 0's.
+        num_predictions = int(
+            (target_timestamp - (window_end_ts - self.prediction_interval)) / self.prediction_interval
+        )
+        pad_width = ((0, num_predictions), (0, 0))
+        seq = np.pad(seq, pad_width)
+        # seq : (total_window_size, quantile_dim+cov_dim)
 
-        pred = pred.cpu().detach().numpy()
+        # The last column of seq should be prefilled with timestamp data instead of padded with 0's
+        entire_window_start_ts = window_start_ts - num_pad_before * self.prediction_interval
+        total_window_size = self.history_window_size + num_predictions
+        entire_window_ts = pd.date_range(
+            start=entire_window_start_ts, periods=total_window_size, freq=self.prediction_interval
+        ).values.astype("float64")
+        entire_window_ts_scaled = (entire_window_ts - timestamp_mean) / timestamp_std
+        seq[:, -1] = entire_window_ts_scaled
+
+        # seq : (1, seq_len, num_quantiles+cov_dim)
+        seq = torch.tensor(seq[None, :, :]).to(DEVICE).float()
+
+        # Unroll LSTM in training window, then in testing window
+        B, T = seq.shape[0], seq.shape[1]
+        seq = seq.permute(1, 0, 2).float().to(DEVICE)  # (1, T, quantile+cov_dim) -> (T, 1, quantile+cov_dim)
+        class_ids = torch.tensor([[params_class_index]]).to(DEVICE)  # (1, 1)
+
+        hidden, cell = model.init_hidden(B), model.init_cell(B)
+        for t in range(self.history_window_size):
+            quantiles, hidden, cell = model(seq[t].unsqueeze(0), class_ids, hidden, cell)
+        pred_quantiles = model.test(
+            seq, class_ids, hidden, cell, self.history_window_size, num_predictions
+        )  # (pred_window_size, 1, q_dim)
 
         # Un-normalize the quantiles.
-        if param_std != 0:
-            pred = pred * param_std + param_mean
-        else:
-            pred = pred + param_mean
+        pred_quantiles = (pred_quantiles.squeeze() * window_std) + window_mean
+        pred_quantiles = pred_quantiles[-1, :]
+        pred_quantiles = torch.cummax(pred_quantiles, dim=0).values.cpu().detach().numpy()
 
         # TODO(WAN): We now have all the quantile values. How do we sample from them?
         # Randomly pick a bucket, and then randomly pick a value.
         # There are len(pred) - 1 many buckets.
-        bucket = self._rng.integers(low=0, high=len(pred) - 1, endpoint=False)
-        left_bound, right_bound = pred[bucket], pred[bucket + 1]
+        bucket = self._rng.integers(low=0, high=len(pred_quantiles) - 1, endpoint=False)
+        left_bound, right_bound = pred_quantiles[bucket], pred_quantiles[bucket + 1]
         param_val = self._rng.uniform(left_bound, right_bound)
 
         return param_val
